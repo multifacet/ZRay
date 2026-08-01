@@ -13,7 +13,7 @@ actually executed. Multiplying the two recovers per-region loads, stores, bytes 
 bandwidth. Because no per-memory-access instrumentation is inserted, overhead stays low
 (geomean under 10%) while byte accuracy stays high (geomean 93%).
 
-This is the research artifact for the IISWC 2026 paper *ZRay: Portable Compiler-Assisted
+This is part of the research artifact for the IISWC 2026 paper *ZRay: Portable Compiler-Assisted
 Memory Traffic Characterization*.
 
 ---
@@ -43,7 +43,7 @@ sudo apt install llvm-15-dev clang-15
 ## Build
 
 ```sh
-git clone <repo-url> zray && cd zray
+git clone https://github.com/multifacet/ZRay/ zray && cd zray
 ./setup.sh                       # or: LLVM_BIN=/path/to/llvm/bin ./setup.sh
 ```
 
