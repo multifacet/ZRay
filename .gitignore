@@ -1,0 +1,50 @@
+# ZRay .gitignore
+#
+# Patterns are deliberately scoped rather than global. An earlier version
+# ignored *.txt, *.S and *.s repo-wide, which shadowed the CMakeLists.txt files
+# and a checked-in .S source — harmless only because those files were already
+# tracked. Keep new patterns as narrow as the artifact they describe.
+
+# --- Build output ----------------------------------------------------------
+bin/
+build/
+*.o
+*.d
+*.so
+*.bc
+
+# Compiler intermediates. Assembly and IR are generated under examples/.
+*.ll
+*.mir
+examples/**/*.s
+
+# --- Run output ------------------------------------------------------------
+*.zlog
+*.csv
+*.log
+*.out
+nohup.out
+zray_log.txt
+tool_log_file.txt
+zray_host_log.bin
+perf.data
+perf.data.old
+m5out/
+
+# Profiling / analysis
+*.prof
+*.profraw
+*.profdata
+*.sf
+*.sf_true
+
+# --- Local scratch ---------------------------------------------------------
+.tmp_img/
+.tmp_cpy/
+tmp/
+log/
+tags
+.vscode/
+asmTest
+crosscompile_test
+gem5_utils

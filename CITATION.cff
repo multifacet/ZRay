@@ -1,0 +1,53 @@
+cff-version: 1.2.0
+message: "If you use ZRay in academic work, please cite the paper below."
+title: "ZRay: Portable Compiler-Assisted Memory Traffic Characterization"
+abstract: >-
+  ZRay is an LLVM compiler pass and runtime that characterizes the memory traffic
+  of developer-marked regions of interest. It separates the statically knowable
+  instruction mix of each region from sampled dynamic execution counts, recovering
+  per-region loads, stores, bytes moved and bandwidth without hardware performance
+  counters and without per-access binary instrumentation.
+authors:
+  - family-names: Poduval
+    given-names: Ashwin
+    email: apoduval@wisc.edu
+    affiliation: "University of Wisconsin-Madison"
+  - family-names: Coffey
+    given-names: Hayden
+    email: hjcoffey@wisc.edu
+    affiliation: "University of Wisconsin-Madison"
+  - family-names: Swift
+    given-names: Michael
+    email: swift@cs.wisc.edu
+    affiliation: "University of Wisconsin-Madison"
+
+license-url: "TODO: set once the LICENSE file is added"
+repository-code: "TODO: set to the public repository URL"
+keywords:
+  - memory traffic
+  - compiler instrumentation
+  - LLVM
+  - workload characterization
+  - performance analysis
+
+preferred-citation:
+  type: conference-paper
+  title: "ZRay: Portable Compiler-Assisted Memory Traffic Characterization"
+  authors:
+    - family-names: Poduval
+      given-names: Ashwin
+      email: apoduval@wisc.edu
+      affiliation: "University of Wisconsin-Madison"
+    - family-names: Coffey
+      given-names: Hayden
+      email: hjcoffey@wisc.edu
+      affiliation: "University of Wisconsin-Madison"
+    - family-names: Swift
+      given-names: Michael
+      email: swift@cs.wisc.edu
+      affiliation: "University of Wisconsin-Madison"
+  collection-title: "Proceedings of the IEEE International Symposium on Workload Characterization (IISWC)"
+  year: 2026
+  notes: "Ashwin Poduval and Hayden Coffey contributed equally."
+  # TODO before release: add `doi`, `start`/`end` page numbers, `publisher`,
+  # and the conference `location`/`month` once the camera-ready details are known.

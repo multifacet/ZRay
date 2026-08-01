@@ -1,0 +1,26 @@
+Paper authors
+-------------
+
+"ZRay: Portable Compiler-Assisted Memory Traffic Characterization" (IISWC 2026):
+
+  Ashwin Poduval*  <apoduval@wisc.edu>    University of Wisconsin-Madison
+  Hayden Coffey*   <hjcoffey@wisc.edu>    University of Wisconsin-Madison
+  Michael Swift    <swift@cs.wisc.edu>    University of Wisconsin-Madison
+
+* Authors contributed equally.
+
+Please cite the paper rather than this file when referencing the work; see
+CITATION.cff.
+
+
+Code contributors
+-----------------
+
+The code in this repository was written by:
+
+  Ashwin Poduval   <apoduval@wisc.edu>
+  Hayden Coffey    <hjcoffey@wisc.edu>
+
+This repository was published from a development history that is not included
+here, so `git blame` does not reach the original commits. Per-file authorship is
+recorded instead in the header of each source file.
