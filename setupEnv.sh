@@ -40,4 +40,4 @@ fi
 #    export CONFIG=llvm-config-12
 #fi
 
-export ZRAY_LOGFILE="$(pwd)/zray.zlog"
+export ZRAY_LOGFILE="zray.zlog"
