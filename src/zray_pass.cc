@@ -319,6 +319,7 @@ namespace zray
             // Miss, clone function and store into map
             ValueToValueMapTy VMap;
             Function *newF = CloneFunction(f, VMap);
+            stripTimingEvents(newF);
             CloneFunctionMap.insert({f->getName().str(), {newF, PragmaRegionID}});
             ClonedFunctionNames.push_back(newF->getName().str());
 

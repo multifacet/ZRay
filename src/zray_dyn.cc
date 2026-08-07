@@ -93,8 +93,21 @@ thread_local size_t LLCMissArray[PRAGMA_REGION_LIMIT];
 
 // Control over sampling at ROI granularity, a bit like representative sampling
 thread_local bool pragmaDisable[PRAGMA_REGION_LIMIT];
-// Single sampling control variable for all ROI, like random sampling
-thread_local bool globalDisable;
+// Single sampling control variable for all ROI, like random sampling. Starts disabled:
+// a thread is outside every region until it enters one, and exits now restore the saved
+// value rather than unconditionally disabling, so the bottom of the stack has to be
+// right for counting to stop when the last region closes.
+thread_local bool globalDisable = true;
+
+// Nesting depth per region. A region can be re-entered before it exits -- most obviously
+// when the instrumented function recurses, but also through indirect calls or one ROI
+// nested inside another. Only the outermost entry may start the timer and only the
+// matching outermost exit may stop it; without this, an inner exit stops the clock and
+// latches globalDisable, silently dropping every counter increment in the remainder of
+// the outer call. Depth is tracked here rather than relying on the pass never emitting
+// an unbalanced pair, because the failure is silent: counters read zero while the
+// elapsed time still looks plausible.
+thread_local size_t RegionDepth[PRAGMA_REGION_LIMIT];
 
 thread_local std::vector<std::pair<std::string, zray::ProfileData> > RegionProfileList;
 thread_local std::vector<size_t> RegionProfileCounts;
@@ -123,13 +136,24 @@ bool Initialized = false;
 // different region than the one it was cloned for, so only a runtime value can
 // attribute its counts correctly. See e89cd57.
 //
-// TODO: Confirm that the claim below is correct.
-// KNOWN GAP (noted in e89cd57): this is not saved/restored around calls, so a
-// caller that executes blocks after a callee opens its own region will keep
-// using the callee's base. The fix is to save and restore it across region
-// entry/exit -- not to go back to the argument, which breaks clones. Do not
-// "fix" this by reverting to pragmaRegionID; that regresses SPEC.
+// The gap noted in e89cd57 -- a caller that runs blocks after a callee opens its own
+// region would keep using the callee's base -- is closed by the save/restore stack
+// below. Do not "fix" it instead by reverting to pragmaRegionID; that breaks clones
+// and regresses SPEC.
 thread_local size_t counterBaseIndex = 0;
+
+// Saved counting state, pushed by the outermost entry to a region and popped by its
+// matching exit, so a region nested inside another hands control back rather than
+// leaving the outer region attributing into the inner one's row for the rest of its
+// body. Depth is bounded by the number of distinct regions that can be simultaneously
+// live, which cannot exceed PRAGMA_REGION_LIMIT.
+struct RegionSave
+{
+    size_t base;
+    bool disable;
+};
+thread_local RegionSave RegionSaveStack[PRAGMA_REGION_LIMIT];
+thread_local size_t RegionSaveTop = 0;
 
 // https://stackoverflow.com/questions/12254980/how-to-get-the-filename-of-the-currently-running-executable-in-c
 // https://stackoverflow.com/questions/1528298/get-path-of-executable
@@ -180,6 +204,19 @@ std::string executableName()
 
 void startTimingEvent(size_t size)
 {
+    // Re-entry into a region already being timed. Leave the running measurement and
+    // the enable flag alone; the outermost entry owns both.
+    if (RegionDepth[size]++ != 0) {
+        return;
+    }
+
+    // Outermost entry: remember the enclosing region's counting state so the matching
+    // exit can hand it back.
+    if (RegionSaveTop < PRAGMA_REGION_LIMIT) {
+        RegionSaveStack[RegionSaveTop] = {counterBaseIndex, globalDisable};
+    }
+    ++RegionSaveTop;
+
 #ifdef USE_HW_PERF_COUNTERS
     if(!perfInit) {
         perfInit = true;
@@ -237,9 +274,36 @@ void startTimingEvent(size_t size)
 
 void endTimingEvent(size_t size)
 {
+    // An exit with no matching entry. The pass should never emit one, so say so rather
+    // than wrapping the depth counter around and disabling the region for the rest of
+    // the run.
+    if (RegionDepth[size] == 0) {
+        std::cerr << "zray: warning: unbalanced region exit for region " << size
+                  << ", ignoring\n";
+        return;
+    }
+    // Still inside an outer entry of the same region: not an exit, so neither the
+    // timer nor the invocation count moves. Count stays one per region invocation,
+    // which is also what startTimingEvent's sampling modulo reads.
+    if (--RegionDepth[size] != 0) {
+        return;
+    }
+
+    // Outermost exit: hand counting back to the enclosing region, if any. Taken before
+    // the globalDisable check below so a sampled-out region still restores.
+    RegionSave saved = {counterBaseIndex, true};
+    if (RegionSaveTop > 0) {
+        --RegionSaveTop;
+        if (RegionSaveTop < PRAGMA_REGION_LIMIT) {
+            saved = RegionSaveStack[RegionSaveTop];
+        }
+    }
+
     // TimingProfile *tp = &(TimingProfiles[*(size_t *)v]);
     ++TimingProfiles[size].Count;
     if (globalDisable) {
+        counterBaseIndex = saved.base;
+        globalDisable = saved.disable;
         return;
     }
     timespec current_time;
@@ -255,7 +319,8 @@ void endTimingEvent(size_t size)
     LLCMissArray[size] += llc_misses_end - llc_misses_start;
     TimingProfiles[size].insn_count += insn_count_end - insn_count_start;
 #endif
-    globalDisable = true;
+    counterBaseIndex = saved.base;
+    globalDisable = saved.disable;
 }
 
 // void incrementCounterArray(size_t pragmaRegionID, size_t postDomSetID, bool enable)

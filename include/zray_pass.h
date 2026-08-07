@@ -217,6 +217,7 @@ namespace zray
         void insertTimerEvent(Module *M, llvm::BasicBlock::iterator PositionIterator, const ProfileData &Profile);
         void insertStartTimerEvent(Module *M, llvm::BasicBlock::iterator PositionIterator, const size_t &pragmaRegionID);
         void insertEndTimerEvent(Module *M, llvm::BasicBlock::iterator PositionIterator, const size_t  &pragmaRegionID);
+        size_t stripTimingEvents(Function *F);
         void insertBBTag(Module *M, llvm::BasicBlock::iterator PositionIterator, size_t CustomEventID, size_t ScaleFactor);
         void insertDiamondEvents(ProfileData &Profile, size_t RegionStart, size_t &RegionEnd, Function &F);
         void recordTagBlocks(const std::vector<llvm::BasicBlock *> *PostDomSet, size_t ScaleFactor, ProfileData &Profile, Module *M);

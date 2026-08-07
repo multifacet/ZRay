@@ -362,6 +362,64 @@ namespace zray
         TimingEventCount++;
     }
 
+    // Remove any region entry/exit timing calls carried into a function clone.
+    //
+    // A clone is by construction reached only from inside a region, so it must never
+    // open or close one. This normally cannot happen, because a callee holds no ROI
+    // markers -- but a self-recursive ROI function is cloned from its own body, and by
+    // then zray_parse.cc has already lowered its ZRAY_ROI_END markers into
+    // endTimingEvent calls (the matching startTimingEvent is emitted later, so it is
+    // absent from the clone). Left in place, every recursive return closes the region:
+    // globalDisable latches true and the remaining counter increments are dropped,
+    // while TotalTimeElapsed re-accumulates the whole interval since the outer entry.
+    // See 505.mcf_r/spec_qsort, where this zeroed every counter and reported 16 days
+    // of elapsed time for a 130 second run.
+    size_t ZRayPass::stripTimingEvents(Function *F)
+    {
+        const std::string startName = mangleFunctionName("startTimingEvent(size_t)");
+        const std::string endName = mangleFunctionName("endTimingEvent(size_t)");
+
+        std::vector<CallInst *> ends;
+        size_t starts = 0;
+        for (auto &BB : *F)
+        {
+            for (auto &I : BB)
+            {
+                auto *CI = dyn_cast<CallInst>(&I);
+                if (!CI)
+                    continue;
+                Function *callee = CI->getCalledFunction();
+                if (!callee)
+                    continue;
+                std::string name = callee->getName().str();
+                if (name == startName)
+                    ++starts;
+                else if (name == endName)
+                    ends.push_back(CI);
+            }
+        }
+
+        // Only the unbalanced case is a bug. A clone that carries both halves is a
+        // region nested inside another, which the runtime handles: it tracks depth and
+        // saves/restores the enclosing region's counting state. Stripping those would
+        // silently merge the inner region into its caller.
+        if (starts != 0 || ends.empty())
+            return 0;
+
+        std::vector<CallInst *> doomed = ends;
+        for (auto *CI : doomed)
+            CI->eraseFromParent();
+
+        if (!doomed.empty())
+        {
+            errs() << "ZRay: stripped " << doomed.size()
+                   << " region timing event(s) from clone " << F->getName()
+                   << " (recursive ROI function)\n";
+        }
+
+        return doomed.size();
+    }
+
     // Insert a dynamic counter update, primarily for loop hoisted counters that are evaluated at runtime
     void ZRayPass::insertDynamicLoopEvent(Module *M, Function &F, llvm::Loop * L, llvm::BasicBlock::iterator posI, const ProfileData &profile, bool IsIndirect)
     {
