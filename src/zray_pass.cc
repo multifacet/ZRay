@@ -280,6 +280,18 @@ namespace zray
         // errs() << "Processing Function Call: " << f->getName() << "\n";
         // errs() << "Basic Block Count: " << f->size() << "\n";
 
+        // With cloning disabled (-functionclone=false) we leave the call pointing at
+        // the original callee and do not register it for instrumentation. The callee's
+        // accesses then go uncounted, which is the coverage that cloning buys. Note we
+        // deliberately do not instrument the original in place: it is also reached from
+        // outside the region, and counterBaseIndex is not saved/restored across calls
+        // (see zray_dyn.cc), so those calls would misattribute into whichever region
+        // ran last rather than simply over-counting.
+        if (!ApplyFunctionCloning)
+        {
+            return;
+        }
+
         // Function is defined, proceed with clone
         Function *newF = processFunctionClone(f, PragmaRegionID);
 
