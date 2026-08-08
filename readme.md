@@ -2,17 +2,6 @@
 
 **Portable compiler-assisted memory traffic characterization.**
 
-ZRay reports how much memory traffic a marked region of your code generates, on which
-threads, and at what rate — without hardware performance counters and without the
-slowdown of binary instrumentation.
-
-Its key idea is to separate what can be known statically from what must be counted at
-runtime. An LLVM IR pass summarizes the memory-relevant instruction mix of each
-developer-marked region; lightweight sampled counters recover how many times each block
-actually executed. Multiplying the two recovers per-region loads, stores, bytes moved, and
-bandwidth. Because no per-memory-access instrumentation is inserted, overhead stays low
-(geomean under 10%) while byte accuracy stays high (geomean 93%).
-
 This is part of the research artifact for the IISWC 2026 paper *ZRay: Portable Compiler-Assisted
 Memory Traffic Characterization*.
 
@@ -22,22 +11,16 @@ Memory Traffic Characterization*.
 
 | | |
 |---|---|
-| OS | Linux (x86-64 tested; AArch64, RISC-V, POWER8 demonstrated) |
+| OS | Linux |
 | LLVM | **15** — `llvm-15-dev` and `clang-15`. A stock upstream LLVM is sufficient. |
 | Build | `make`, a C++14 host compiler |
-| Optional | gem5 (simulator runs), `perf`/PMU access (`-DUSE_HW_PERF_COUNTERS`) |
+| Optional | `perf`/PMU access (`-DUSE_HW_PERF_COUNTERS`) |
 
 On Debian/Ubuntu:
 
 ```sh
 sudo apt install llvm-15-dev clang-15
 ```
-
-> **No custom LLVM is required.** Earlier versions of ZRay used a patched clang that added
-> a `#pragma begin_instrument`. Regions are now marked with ordinary inline asm macros
-> (see [Marking regions](#marking-regions)), which produce identical IR, so a stock
-> toolchain works. ZRay pins LLVM 15 because the IR pass uses the legacy pass manager.
-
 ---
 
 ## Build
@@ -68,7 +51,7 @@ make zray
 
 ## Quick start
 
-Mark a region, then build it through the four-step pipeline:
+Mark a region of interest (ROI), then build it through the four-step pipeline:
 
 ```c
 // kernel.cc
@@ -76,7 +59,7 @@ Mark a region, then build it through the four-step pipeline:
 #include <cstdlib>
 
 void kernel(double *a, double *b, int n) {
-    ZRAY_BEGIN(15);
+    ZRAY_BEGIN(15); // Will create ROI with label 15.
     for (int i = 0; i < n; i++)
         a[i] = b[i] * 2.0;
     ZRAY_END(15);
@@ -118,7 +101,7 @@ Run it, and ZRay writes `zray_application_stats.csv` next to the binary:
 ```
 
 The CSV has two `Region` rows here. At `-O2` clang inlines `kernel` into `main`, so the
-work is reported under **`main`**, and the `kernel` row is nearly empty:
+work is reported under **`main`**:
 
 ```
 Function            Loads    Stores   Read Bytes   Written Bytes
@@ -127,14 +110,7 @@ _Z6kernelPdS_i          1         1          8            8
 ```
 
 `Written Bytes` matches the expected 100000 × 8 = 800 KB. `Stores` is about half the
-iteration count because the loop vectorized — two doubles per store instruction — which is
-exactly the kind of thing ZRay is meant to surface.
-
-> **Reading the CSV:** expect several rows. At `-O2` clang may inline the marked function
-> into its caller, in which case the callee's region reports zeros and the traffic appears
-> under the caller's region. Look at the `Entry type = Region` summary rows first; the
-> `Basic Block` rows break the same totals down per block, and many of them are legitimately
-> zero.
+iteration count because the loop vectorized, two doubles per store instruction.
 
 A worked example lives in `examples/` — `make -C examples` builds `bin/mem`.
 
@@ -150,15 +126,10 @@ ZRAY_BEGIN(group_id);
 ZRAY_END(group_id);
 ```
 
-Both macros expand to a volatile inline asm comment (`#ZRAY_ROI_BEGIN <id>`). They emit
-no machine code — they are assembler comments the IR pass scans for — but they are not
-optimized away.
+Both macros expand to a volatile inline asm comment (`#ZRAY_ROI_BEGIN <id>`).
+the IR pass scans for.
 
-The **group ID** labels a region. Regions may share an ID to form a group. Regions can
-nest; ZRay tracks the enclosing region.
-
-Marking must be lexically balanced within a function. Regions spanning function boundaries
-are not supported — mark inside the callee instead.
+The **group ID** labels a region. Regions may share an ID to form a group.
 
 ---
 
@@ -172,7 +143,6 @@ are not supported — mark inside the callee instead.
 | `ZRAY_SAMPLE_RATE` | default `1` | Instrument every *N*th region execution. `1` = every execution; `100` = every hundredth; `0` = disable. Higher values cut overhead; see the paper's sampling study. |
 | `ZRAY_BIN_PATH` | set by `setupEnv.sh` | Output directory for build artifacts. |
 | `LLVM_BIN` | default `/usr/lib/llvm-15/bin` | Which LLVM install to build against. |
-| `GEM5_PATH` | optional | gem5 checkout, for the `*_gem5` make targets. |
 
 `ZRAY_INST` and `ZRAY_PATCH_ID` are read by the runtime but are leftovers from an earlier
 XRay-based design; the handlers they configured are commented out. Treat them as
@@ -189,8 +159,6 @@ Passed to `opt` after `-zray`:
 | `--functionclone` | `true` | Clone functions called from a region so their traffic is attributed to that region. |
 | `--full-scan` | `false` | Instrument every function, ignoring region markers. |
 | `--hostmonitor` | `false` | Enable host-thread monitoring. |
-
-`--mirpass` is accepted but inert; the machine-level pass it enabled has been removed.
 
 ---
 
@@ -246,25 +214,6 @@ Source layout:
 | `src/zray_dyn.cc` | runtime: counters, timing, sampling, CSV output |
 | `src/post_process.cc` | offline log reader |
 | `include/zray.h` | `ZRAY_BEGIN` / `ZRAY_END` |
-
----
-
-## Limitations
-
-- **LLVM 15 only.** The pass uses the legacy pass manager (`-enable-new-pm=0`).
-- **Regions must be lexically balanced within one function.**
-- **Estimates, not measurements.** Byte counts come from static mix × dynamic counts, so
-  they reflect instruction-level traffic, not cache or DRAM traffic. Geomean accuracy is
-  93%; see the paper for the distribution.
-- **Sampling trades accuracy for overhead.** `ZRAY_SAMPLE_RATE > 1` captures roughly a
-  proportional share of traffic. ZRay always samples the first execution of a region.
-- **Inlining moves attribution.** If the compiler inlines a marked function into its
-  caller, the traffic is reported under the caller's region and the callee's region reports
-  zeros. This is correct — the work really did happen in the caller — but it surprises
-  people reading per-function rows.
-- Indirect calls are attributed through function cloning, which cannot resolve every
-  target.
-- Some counting paths assume a single region of interest.
 
 ---
 
