@@ -318,12 +318,12 @@ namespace zray
         };
 
         //Application wide loop stats
-        LoopStats AppLS; 
+        LoopStats AppLS;
         //ROI loop stats
         LoopStats ROILS;
 
         std::vector<LoopData> getLoopInRegion(size_t Begin, size_t End, Function &F);
-        bool getBackedgeTakenCount(const Loop *L, size_t *Count);
+        bool getLoopTripCount(const Loop *L, size_t *Count);
         size_t getScaleFactor(std::vector<LoopData> LoopList, size_t Position, Function &F);
         LoopData loopToLoopData(Loop *l, Function &F);
         std::vector<LoopData> loopVToLoopDataV(std::vector<Loop *> LoopVector, Function &F);

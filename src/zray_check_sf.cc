@@ -31,7 +31,7 @@ bool SFCheckPass::runOnModule(Module &M)
 	{
 		if(curFunc->isDeclaration())
 		{
-			continue;	
+			continue;
 		}
 
 		modified = modified | runOnFunction(*curFunc);
@@ -82,7 +82,7 @@ bool SFCheckPass::runOnFunction(Function &F)
 	for(Loop *L: *LI)
 	{
 		sf = 0;
-		getBackedgeTakenCount(L, &sf);
+		getLoopTripCount(L, &sf);
 		TotalTripCount+=sf;
 		evalLoopSF(L);
 	}
@@ -96,14 +96,14 @@ void SFCheckPass::evalLoopSF(const Loop * L)
 	for(Loop *ls : L->getSubLoops())
 	{
 		sf = 0;
-		getBackedgeTakenCount(ls, &sf);
+		getLoopTripCount(ls, &sf);
 		TotalTripCount+=sf;
 		evalLoopSF(ls);
 	}
 }
 
-// Set @count to loop back edge taken count if it can be calculated
-bool SFCheckPass::getBackedgeTakenCount(const Loop *L, size_t *count)
+// Set @count to the loop trip count if it can be calculated.
+bool SFCheckPass::getLoopTripCount(const Loop *L, size_t *count)
 {
 	const SCEV *v = SE->getBackedgeTakenCount(L, llvm::ScalarEvolution::ExitCountKind::Exact);
 
@@ -123,6 +123,9 @@ bool SFCheckPass::getBackedgeTakenCount(const Loop *L, size_t *count)
 		v->print(ss);
 		*count = strtoumax(ss.str().c_str(), nullptr, 10);
 		ASSERT(*count != UINTMAX_MAX, "Loop Backedge count overflow!");
+
+		// Convert backedge-taken count to trip count.
+		*count += 1;
 
 		return true;
 	}

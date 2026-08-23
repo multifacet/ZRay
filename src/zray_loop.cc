@@ -46,7 +46,7 @@ namespace zray
         if (INBOUNDS(b, e, getBBOffset(OrderedCFG, loop->getHeader()) - loop->getHeader()->size()))
         {
             child = new LoopTreeNode(parent, new LoopData(loop));
-            getBackedgeTakenCount(child->NodeData->loop, &(child->NodeData->ScaleFactor));
+            getLoopTripCount(child->NodeData->loop, &(child->NodeData->ScaleFactor));
             parent->ChildList.push_back(child);
 
             CollectSingleLoopStatistics(loop, ROILS);
@@ -383,14 +383,22 @@ namespace zray
         return inserted_event;
     }
 
-    // Set @count to loop back edge taken count if it can be calculated.
+    // Set @count to the loop trip count if it can be calculated.
     //
-    // Backedge-taken count, not trip count, is the right basis for ZRay's scale
-    // factors: it is what the hoisted counter must be multiplied by. Note that
-    // LoopInfo models natural loops only — it is not complete cycle detection,
-    // so irreducible control flow is not covered here and falls back to
-    // per-block counting.
-    bool ZRayPass::getBackedgeTakenCount(const Loop *L, size_t *count)
+    // Trip count, not backedge-taken count, is the right basis for ZRay's scale
+    // factors. The hoisted counter is placed on the preheader edge, so it fires
+    // once per loop entry, while every block that post-dominates the header runs
+    // once per iteration -- that is BTC + 1 times per entry, not BTC. Scaling by
+    // BTC drops one iteration per entry, which compounds under chain hoisting.
+    //
+    // Returning BTC + 1 also disambiguates success from failure: a single-
+    // iteration loop has BTC == 0, which callers treat as "could not compute"
+    // because LoopData::ScaleFactor is zero-initialized. A trip count is >= 1.
+    //
+    // Note that LoopInfo models natural loops only -- it is not complete cycle
+    // detection, so irreducible control flow is not covered here and falls back
+    // to per-block counting.
+    bool ZRayPass::getLoopTripCount(const Loop *L, size_t *count)
     {
         if (!SE->hasLoopInvariantBackedgeTakenCount(L))
         {
@@ -412,6 +420,9 @@ namespace zray
             v->print(ss);
             *count = strtoumax(ss.str().c_str(), nullptr, 10);
             ASSERT(*count != UINTMAX_MAX, "Loop Backedge count overflow!");
+
+            // Convert backedge-taken count to trip count.
+            *count += 1;
 
             return true;
         }

@@ -454,6 +454,11 @@ namespace zray
 
         Value * dynSFInt64 = builder.CreateIntCast(dynSF, IntType, false);
 
+        // v is the backedge-taken count; the blocks this counter covers post-dominate
+        // the loop header and therefore run BTC + 1 times per loop entry. The counter
+        // fires once per entry, so it must be advanced by the trip count.
+        dynSFInt64 = builder.CreateAdd(dynSFInt64, ConstantInt::get(IntType, 1));
+
         // Create function call to incrementCounterArraySF
         FunctionType *customType = FunctionType::get(Type::getVoidTy(M->getContext()),
                                                      {Type::getInt64Ty(M->getContext()),
