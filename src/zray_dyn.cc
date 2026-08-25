@@ -612,6 +612,110 @@ void print_counter_array()
     }
 }
 
+// ===================== MST placement arm (--placement=mst) =====================
+// The runtime does no in-process reconstruction: with MST placement, ZRAY_LOGFILE
+// holds no ProfileData records, because a counter measures an EDGE traversal and
+// the per-block mix lives in the "$ZRAY_LOGFILE.mst" sidecar instead. So the
+// runtime just dumps the raw counter array and zray_post_process solves flow
+// offline against that sidecar. Keeping the solver out of the process is
+// deliberate: it keeps the runtime-overhead comparison honest, since no graph
+// solve runs in the timed path (real PGO does not do one either).
+//
+// MST mode is detected by the sidecar file's presence, so no extra runtime flag
+// or environment variable is needed.
+//
+// Dump format matches what zray_post_process main() already reads: a one-time
+// (width, roiCount) header, then per finalize call
+// {tid, counterArray, timeDelta, loadRuntimeArray, storeRuntimeArray}. Each dump
+// uses a fresh tid so the reader treats it as raw counts rather than an epoch
+// delta against a previous dump from the same thread.
+static bool MstDumpInit = false;
+static size_t MstDumpTid = 0;
+
+static bool inMstMode()
+{
+    const char *lf = std::getenv("ZRAY_LOGFILE");
+    if (lf == nullptr)
+    {
+        return false;
+    }
+    std::ifstream probe(std::string(lf) + ".mst", std::ios::binary);
+    return probe.good();
+}
+
+// Report any region this thread entered but never left.
+//
+// The pass emits exactly one endTimingEvent, in the single block it picked as the
+// region end (zray_pass.cc, insertEndTimerEvent under FullScan). A function that
+// returns through some other exit therefore never runs it, so RegionDepth never
+// returns to 0. After that, every later entry to that region looks like re-entry,
+// startTimingEvent returns early, and the region silently stops counting.
+//
+// This matters more for the MST arm than for the native arms. A ZRay counter is a
+// block count that stands on its own, so lost increments show up as a proportional
+// undercount. An MST counter is one term in a flow system: dropping part of an
+// invocation leaves the system inconsistent, and the flow solve then produces a
+// plausible-looking wrong answer (negative solutions are clamped to zero rather
+// than reported). So this is a hard check, not a diagnostic to skim past.
+static void mst_check_region_balance()
+{
+    size_t unbalanced = 0;
+    for (size_t i = 0; i < PragmaRegionCount && i < PRAGMA_REGION_LIMIT; i++)
+    {
+        if (RegionDepth[i] != 0)
+        {
+            if (unbalanced == 0)
+            {
+                std::cerr << "zray: WARNING: unbalanced region(s) at thread exit -- "
+                             "counts for these regions are unreliable:\n";
+            }
+            std::cerr << "zray:   region " << i << " depth=" << RegionDepth[i] << "\n";
+            unbalanced++;
+        }
+    }
+    if (unbalanced != 0)
+    {
+        std::cerr << "zray: " << unbalanced << " region(s) never closed. The pass emits one "
+                     "end-timer per region; a function returning through another exit leaves "
+                     "the region open. MST flow reconstruction is not valid for these.\n";
+    }
+}
+
+static void mst_dump_counters()
+{
+    std::ofstream hostlog("zray_host_log.bin", std::ios_base::app | std::ios::binary);
+    size_t width = ZRAY_CounterDimension;
+    size_t roi = PragmaRegionCount;
+    size_t sz = width * roi;
+
+    if (!MstDumpInit)
+    {
+        hostlog.write((char *)&width, sizeof(size_t));
+        hostlog.write((char *)&roi, sizeof(size_t));
+        MstDumpInit = true;
+    }
+    size_t tid = MstDumpTid++;
+    hostlog.write((char *)&tid, sizeof(size_t));
+    for (size_t i = 0; i < sz; i++)
+    {
+        size_t v = CounterArray[i];
+        hostlog.write((char *)&v, sizeof(size_t));
+    }
+    size_t timeDelta = 0;
+    hostlog.write((char *)&timeDelta, sizeof(size_t));
+    for (size_t i = 0; i < sz; i++)
+    {
+        size_t v = LoadRuntimeArray[i];
+        hostlog.write((char *)&v, sizeof(size_t));
+    }
+    for (size_t i = 0; i < sz; i++)
+    {
+        size_t v = StoreRuntimeArray[i];
+        hostlog.write((char *)&v, sizeof(size_t));
+    }
+    hostlog.close();
+}
+
 void zray_finalize()
 {
     timespec preprocess_start_time, preprocess_end_time;
@@ -634,6 +738,16 @@ void zray_finalize()
     cout << "Total counter array size is " << ZRAY_CounterDimension * PragmaRegionCount << "\n";
 
     print_counter_array();
+
+    // MST arm: dump raw counters for offline reconstruction, then skip the ZRay
+    // in-process aggregation below -- it would read a ProfileData log that this
+    // arm never wrote.
+    if (inMstMode())
+    {
+        mst_check_region_balance();
+        mst_dump_counters();
+        return;
+    }
 
     ofstream csvfile;
     // Initialize stat csv

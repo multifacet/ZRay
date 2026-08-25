@@ -7,7 +7,11 @@
 
 #include <fstream>
 #include <iostream>
+#include <cstring>
+#include <unordered_map>
+#include <vector>
 #include "zray_dyn.h"
+#include "zray_mst.h"
 
 std::string LOGO = "\
  ____________  _____   __\n\
@@ -415,8 +419,249 @@ void zray_finalize(size_t * CounterArray, size_t TimingProfiles, size_t * LoadRu
 }
 
 
+// ===================== MST placement arm (--placement=mst) =====================
+// Reads the per-function sidecar (include/zray_mst.h), reconstructs each block's
+// execution count from the measured non-tree edge counters by solving flow over
+// the spanning tree, then scales each block's static mix by its count and
+// aggregates per-function and overall. See the header comment in src/zray_mst.cc.
+
+struct MstBlock { uint64_t Id; zray::ProfileData Mix; };
+struct MstEdge  { uint64_t Src; uint64_t Dst; bool InMst; int64_t CtrIdx; };
+struct MstFuncRecord
+{
+    std::string Name;
+    uint64_t Region;
+    bool Indirect;
+    std::vector<MstBlock> Blocks;
+    std::vector<MstEdge> Edges;
+};
+
+static bool parse_mst_sidecar(const std::string &Path, std::vector<MstFuncRecord> &Out)
+{
+    std::ifstream F(Path, std::ios::binary);
+    if (!F)
+    {
+        return false;
+    }
+    uint64_t Magic;
+    while (F.read(reinterpret_cast<char *>(&Magic), sizeof(Magic)))
+    {
+        if (Magic != ZRAY_MST_MAGIC)
+        {
+            std::cerr << "MST sidecar: bad magic, aborting parse\n";
+            return false;
+        }
+        MstFuncRecord R;
+        uint8_t Indirect;
+        uint64_t NameLen;
+        F.read(reinterpret_cast<char *>(&R.Region), sizeof(R.Region));
+        F.read(reinterpret_cast<char *>(&Indirect), sizeof(Indirect));
+        R.Indirect = Indirect;
+        F.read(reinterpret_cast<char *>(&NameLen), sizeof(NameLen));
+        R.Name.resize(NameLen);
+        F.read(&R.Name[0], NameLen);
+
+        uint64_t NumBlocks;
+        F.read(reinterpret_cast<char *>(&NumBlocks), sizeof(NumBlocks));
+        R.Blocks.resize(NumBlocks);
+        for (uint64_t i = 0; i < NumBlocks; i++)
+        {
+            F.read(reinterpret_cast<char *>(&R.Blocks[i].Id), sizeof(uint64_t));
+            F.read(reinterpret_cast<char *>(&R.Blocks[i].Mix), sizeof(zray::ProfileData));
+        }
+        uint64_t NumEdges;
+        F.read(reinterpret_cast<char *>(&NumEdges), sizeof(NumEdges));
+        R.Edges.resize(NumEdges);
+        for (uint64_t i = 0; i < NumEdges; i++)
+        {
+            uint8_t M;
+            F.read(reinterpret_cast<char *>(&R.Edges[i].Src), sizeof(uint64_t));
+            F.read(reinterpret_cast<char *>(&R.Edges[i].Dst), sizeof(uint64_t));
+            F.read(reinterpret_cast<char *>(&M), sizeof(M));
+            R.Edges[i].InMst = M;
+            F.read(reinterpret_cast<char *>(&R.Edges[i].CtrIdx), sizeof(int64_t));
+        }
+        Out.push_back(std::move(R));
+    }
+    return true;
+}
+
+// Solve flow over the spanning tree: measured (non-tree) edges seed the known
+// counts, tree edges are filled by leaf-elimination (a node with exactly one
+// unknown incident edge is resolved by conservation in==out). Returns each
+// block's execution count = sum of its incoming edge counts.
+static std::unordered_map<uint64_t, uint64_t>
+reconstruct_block_counts(const MstFuncRecord &R, const size_t *CounterArray, size_t Width)
+{
+    size_t Base = R.Region * Width;
+    size_t E = R.Edges.size();
+    std::vector<long long> ECount(E, -1); // -1 == unknown
+
+    // node -> list of (edgeIndex, isOutEdge)
+    std::unordered_map<uint64_t, std::vector<std::pair<size_t, bool>>> Inc;
+    std::unordered_map<uint64_t, int> Unk; // # unknown incident edges
+
+    for (size_t i = 0; i < E; i++)
+    {
+        const MstEdge &e = R.Edges[i];
+        if (!e.InMst)
+        {
+            ECount[i] = static_cast<long long>(CounterArray[Base + e.CtrIdx]);
+        }
+        Inc[e.Src].push_back({i, true});
+        Inc[e.Dst].push_back({i, false});
+        if (e.InMst)
+        {
+            Unk[e.Src]++;
+            Unk[e.Dst]++;
+        }
+        else
+        {
+            // ensure both endpoints exist in Unk with a baseline of 0
+            Unk[e.Src] += 0;
+            Unk[e.Dst] += 0;
+        }
+    }
+
+    std::vector<uint64_t> Work;
+    for (auto &kv : Unk)
+    {
+        if (kv.second == 1)
+        {
+            Work.push_back(kv.first);
+        }
+    }
+    while (!Work.empty())
+    {
+        uint64_t n = Work.back();
+        Work.pop_back();
+        if (Unk[n] != 1)
+        {
+            continue;
+        }
+        long long KnownIn = 0, KnownOut = 0, UnkEdge = -1;
+        bool UnkIsOut = false;
+        for (auto &pr : Inc[n])
+        {
+            size_t ei = pr.first;
+            bool isOut = pr.second;
+            if (ECount[ei] < 0)
+            {
+                UnkEdge = static_cast<long long>(ei);
+                UnkIsOut = isOut;
+            }
+            else if (isOut)
+            {
+                KnownOut += ECount[ei];
+            }
+            else
+            {
+                KnownIn += ECount[ei];
+            }
+        }
+        if (UnkEdge < 0)
+        {
+            Unk[n] = 0;
+            continue;
+        }
+        long long Val = UnkIsOut ? (KnownIn - KnownOut) : (KnownOut - KnownIn);
+        if (Val < 0)
+        {
+            Val = 0;
+        }
+        ECount[UnkEdge] = Val;
+        const MstEdge &e = R.Edges[UnkEdge];
+        Unk[e.Src]--;
+        Unk[e.Dst]--;
+        if (Unk[e.Src] == 1)
+        {
+            Work.push_back(e.Src);
+        }
+        if (Unk[e.Dst] == 1)
+        {
+            Work.push_back(e.Dst);
+        }
+    }
+
+    std::unordered_map<uint64_t, uint64_t> BC;
+    for (const MstBlock &b : R.Blocks)
+    {
+        BC[b.Id] = 0;
+    }
+    for (size_t i = 0; i < E; i++)
+    {
+        long long c = ECount[i] < 0 ? 0 : ECount[i];
+        BC[R.Edges[i].Dst] += static_cast<uint64_t>(c);
+    }
+    return BC;
+}
+
+static std::unordered_map<std::string, zray::ProfileData> MstPerFunc;
+static zray::ProfileData MstOverall;
+
+static void mst_finalize(const std::vector<MstFuncRecord> &Recs, const size_t *CounterArray, size_t Width)
+{
+    for (const MstFuncRecord &R : Recs)
+    {
+        auto BC = reconstruct_block_counts(R, CounterArray, Width);
+        for (const MstBlock &b : R.Blocks)
+        {
+            uint64_t Cnt = BC[b.Id];
+            if (Cnt == 0)
+            {
+                continue;
+            }
+            size_t Tmp[1] = {Cnt};
+            zray::ProfileData Scaled = ApplyCounter(b.Mix, 0, Tmp);
+            MstPerFunc[R.Name] = MstPerFunc[R.Name] + Scaled;
+            MstOverall = MstOverall + Scaled;
+        }
+    }
+}
+
+static void write_mst_csv()
+{
+    std::ofstream csv("zray_application_stats.csv", std::ios::trunc);
+    csv << "app,scope,function,loads,stores,bytes_read,bytes_written,int_inst,fp_inst,total_inst\n";
+    const char *AppEnv = std::getenv("ZRAY_APP_NAME");
+    std::string app = AppEnv ? AppEnv : "app";
+    for (auto &kv : MstPerFunc)
+    {
+        const zray::ProfileData &p = kv.second;
+        csv << app << ",Function," << kv.first << "," << p.LoadCount << "," << p.StoreCount << ","
+            << p.BytesRead << "," << p.BytesWritten << "," << p.IntInstructionCount << ","
+            << p.FpInstructionCount << "," << p.TotalInstCount << "\n";
+    }
+    const zray::ProfileData &o = MstOverall;
+    csv << app << ",Overall,ALL," << o.LoadCount << "," << o.StoreCount << ","
+        << o.BytesRead << "," << o.BytesWritten << "," << o.IntInstructionCount << ","
+        << o.FpInstructionCount << "," << o.TotalInstCount << "\n";
+    csv.close();
+
+    std::cout << "MST totals: loads=" << o.LoadCount << " stores=" << o.StoreCount
+              << " bytesR=" << o.BytesRead << " bytesW=" << o.BytesWritten
+              << " totalInst=" << o.TotalInstCount << "\n";
+}
+
 int main()
 {
+    // MST arm: if a sidecar sits next to ZRAY_LOGFILE, take the MST path instead
+    // of the native ZRay post-dom log path. Presence of the sidecar is the only
+    // signal needed -- the pass writes it only under --placement=mst.
+    const char *LogEnv = std::getenv("ZRAY_LOGFILE");
+    std::vector<MstFuncRecord> MstRecs;
+    bool MstMode = false;
+    if (LogEnv != nullptr)
+    {
+        std::string SidecarPath = std::string(LogEnv) + ".mst";
+        std::ifstream Probe(SidecarPath, std::ios::binary);
+        if (Probe.good())
+        {
+            Probe.close();
+            MstMode = parse_mst_sidecar(SidecarPath, MstRecs) && !MstRecs.empty();
+        }
+    }
+
     std::ifstream logfile;
     std::string logfileName = "zray_host_log.bin";
 
@@ -505,14 +750,26 @@ int main()
 #endif
         
         std::cout << "Processing epoch " << epochNum << "\n";
+        if (MstMode)
+        {
+            mst_finalize(MstRecs, counterArray, counterWidth);
+        }
+        else
+        {
 #ifdef USE_HW_PERF_COUNTERS
-        zray_finalize(counterArray, timeDelta, loadruntimeArray, storeruntimeArray, llcMisses, roiCount, counterWidth, tid, LogIteration);
+            zray_finalize(counterArray, timeDelta, loadruntimeArray, storeruntimeArray, llcMisses, roiCount, counterWidth, tid, LogIteration);
 #else
-        zray_finalize(counterArray, timeDelta, loadruntimeArray, storeruntimeArray, roiCount, counterWidth, tid, LogIteration);
+            zray_finalize(counterArray, timeDelta, loadruntimeArray, storeruntimeArray, roiCount, counterWidth, tid, LogIteration);
 #endif
+        }
 
         epochNum++;
     }
 
     logfile.close();
+
+    if (MstMode)
+    {
+        write_mst_csv();
+    }
 }
