@@ -114,6 +114,9 @@ namespace zray
         size_t TotalStoreCount;
         size_t CountArraySize;
 
+        // Basic blocks added by instrumentation-driven edge splitting.
+        size_t StaticSplitBlocksAdded;
+
         llvm::PostDominatorTree *PostDomTree;
         llvm::DominatorTree *PreDomTree;
 
@@ -133,6 +136,11 @@ namespace zray
         std::vector<StoreInst *> StoreRuntimeRegionOffsetUpdateInstList;
 
         std::ofstream PragmaRegionLogFile;
+
+        // Per-function block/edge topology for the MST arm, written to
+        // "$ZRAY_LOGFILE.mst". Only opened when --placement=mst. See
+        // include/zray_mst.h for the binary format.
+        std::ofstream MstSidecarFile;
 
         //std::vector<llvm::BasicBlock *> OrderedCFG;
 
@@ -223,6 +231,13 @@ namespace zray
         void recordTagBlocks(const std::vector<llvm::BasicBlock *> *PostDomSet, size_t ScaleFactor, ProfileData &Profile, Module *M);
         bool instrumentPostDomSet(std::vector<llvm::BasicBlock *> *NonPostDomSet, PostDominatorTree *PostDomTree,
                                   size_t PragmaRegionID, size_t GroupNumber, Function &F, bool IsIndirect);
+        // MST placement strategy (--placement=mst), defined in zray_mst.cc.
+        // Replaces post-dom-set/hoist placement with LLVM PGO's spanning-tree edge
+        // placement. NonPostDomSet is accepted for signature parity with
+        // instrumentPostDomSet but is unused: CFGMST operates over the whole
+        // function, which is why this arm requires --full-scan.
+        bool instrumentMST(std::vector<llvm::BasicBlock *> *NonPostDomSet, size_t PragmaRegionID,
+                           size_t GroupNumber, Function &F, bool IsIndirect);
         bool insertPostDomSetEvents(const std::vector<llvm::BasicBlock *> *PostDomSet, size_t PragmaRegionID,
                                     size_t GroupNumber, Function &F, bool IsIndirect, llvm::BasicBlock *TargetBlock = nullptr, size_t ScaleFactor = 1);
         bool insertPostDomSetEvents(const bb_sf_pair_vec *pd, size_t PragmaRegionID, size_t GroupNumber,

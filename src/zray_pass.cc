@@ -13,6 +13,8 @@
  */
 #include "zray_pass.h"
 #include "llvm/IR/CFG.h"
+#include "llvm/Analysis/BranchProbabilityInfo.h"
+#include "llvm/Analysis/BlockFrequencyInfo.h"
 #include "llvm/ADT/SCCIterator.h"
 #include <algorithm>
 #include <queue>
@@ -30,6 +32,12 @@ namespace zray
     static cl::opt<bool> ApplyMIRPass("mirpass", cl::desc("Enable LLVM MIR pass."), cl::value_desc("true/false"), cl::Hidden, cl::init(false));
     static cl::opt<bool> ApplyFunctionCloning("functionclone", cl::desc("Enable function cloning."), cl::value_desc("true/false"), cl::Hidden, cl::init(true));
     static cl::opt<bool> EnableHostMonitor("hostmonitor", cl::desc("Enable host thread monitoring"), cl::value_desc("true/false"), cl::Hidden, cl::init(false));
+    // Counter placement strategy. "zray" (default) is the native post-dominator
+    // set + loop-hoisting placement, gated by --postdomset/--loophoist. "mst"
+    // replaces it with LLVM PGO's spanning-tree edge placement (zray_mst.cc) and
+    // requires --full-scan. Everything else about instrumentation is unchanged,
+    // so placement is the only variable between the two.
+    static cl::opt<std::string> PlacementStrategy("placement", cl::desc("Counter placement strategy."), cl::value_desc("zray/mst"), cl::Hidden, cl::init("zray"));
 
     // Create a BFS ordering of CFG blocks
     std::vector<llvm::BasicBlock *> ZRayPass::orderBasicBlocks(Function &F)
@@ -497,6 +505,12 @@ namespace zray
 
             auto bb = llvm::SplitEdge(L->getLoopPredecessor(), L->getHeader());
 
+            // Charged unconditionally: on the SCEV-failure path below this block
+            // is left behind rather than cleaned up, so it is real code growth
+            // either way. Same accounting the MST arm applies to its critical-edge
+            // splits.
+            StaticSplitBlocksAdded++;
+
             LI = &(getAnalysis<LoopInfoWrapperPass>(F).getLoopInfo());
 
             PreDomTree->recalculate(F);
@@ -518,6 +532,9 @@ namespace zray
             recordTagBlocks(blocks, 1, profile, M);
 
             insertDynamicLoopEvent(M, F, L, bb->getFirstInsertionPt(), profile, IsIndirect);
+
+            // Count these blocks as covered
+            BasicBlockCount += blocks->size();
 
             HoistedCounters++;
             DynHoistedCounters++;
@@ -555,6 +572,12 @@ namespace zray
         AU.addRequired<LoopInfoWrapperPass>();
         AU.addRequired<ScalarEvolutionWrapperPass>();
         AU.addRequired<PostDominatorTreeWrapperPass>();
+        // Required by the MST placement strategy (--placement=mst): CFGMST weights
+        // edges by branch probability / block frequency so hot edges land in the
+        // tree and stay uninstrumented. Registered unconditionally because
+        // getAnalysisUsage cannot see the option's value per-run.
+        AU.addRequired<BranchProbabilityInfoWrapperPass>();
+        AU.addRequired<BlockFrequencyInfoWrapperPass>();
     }
 
     bool ZRayPass::runOnModule(Module &M)
@@ -568,7 +591,8 @@ namespace zray
         TotalLoadCount = 0;
         TotalStoreCount = 0;
         IgnoredBasicBlockCount = 0;
-        
+        StaticSplitBlocksAdded = 0;
+
         PostDomTree = new PostDominatorTree();
         PreDomTree = new DominatorTree();
 
@@ -650,6 +674,26 @@ namespace zray
         }
 
         PragmaRegionLogFile.open(LogFileName, std::ios::out | std::ios::binary);
+
+        // The MST placement arm writes a separate per-function sidecar (block +
+        // edge/tree topology) next to ZRAY_LOGFILE, leaving the ZRay log format
+        // untouched. See include/zray_mst.h.
+        if (PlacementStrategy == "mst")
+        {
+            std::string SidecarName = std::string(LogFileName) + ".mst";
+            MstSidecarFile.open(SidecarName, std::ios::out | std::ios::binary);
+            if (!MstSidecarFile.is_open())
+            {
+                errs() << "ZRay: could not open MST sidecar '" << SidecarName << "'\n";
+                return 0;
+            }
+            if (!FullScan)
+            {
+                errs() << "ZRay: --placement=mst requires --full-scan; CFGMST operates "
+                          "over whole functions, not pragma regions.\n";
+                return 0;
+            }
+        }
 
         if (modified)
         {
@@ -766,8 +810,10 @@ namespace zray
 
         errs() << "Pragma Regions found : " << PRList.size() << "\n";
         errs() << "Timing Events Inserted: " << TimingEventCount << "\n";
+        errs() << "Placement Strategy: " << PlacementStrategy << "\n";
         errs() << "Total Counters Inserted: " << GlobalCounterEventTotal << "\n";
         errs() << "Most Counters in Region: " << RegionCounterEventMax << "\n";
+        errs() << "Split Blocks Added: " << StaticSplitBlocksAdded << "\n";
         errs() << "BB Covered: " << BasicBlockCount << "\n";
         errs() << "BB Ignored: " << IgnoredBasicBlockCount << "\n";
         errs() << "Loads Covered: " << TotalLoadCount << "\n";
@@ -998,6 +1044,17 @@ namespace zray
                 endBlock = beginBlock;
         }
 
+        // Placement: MST (LLVM PGO-style) replaces ZRay's post-dom/hoist placement
+        // entirely. The surrounding scaffolding -- TLS counter pointer, timing
+        // events, thread-exit handler -- is measurement infrastructure and stays
+        // identical across strategies, so placement is the only variable.
+        if (PlacementStrategy == "mst")
+        {
+            insertedSled |= instrumentMST(npd, regionProfile.PragmaRegionID, groupID, *F, IsIndirect);
+        }
+        else
+        {
+
         // Instrument blocks that are part of loops========================
 
         if (ApplyLoopHoisting)
@@ -1028,6 +1085,10 @@ namespace zray
                 // Create basic block before outer loop header for later use as instrumentation point
                 auto bb = llvm::SplitEdge(lroot->NodeData->loop->getLoopPredecessor(), lroot->NodeData->loop->getHeader());
 
+                // Charged the same way the MST arm charges its critical-edge
+                // splits: a block added to hold a counter is real code growth.
+                StaticSplitBlocksAdded++;
+
                 HoistedCounters++;
                 StaticHoistedCounters++;
 
@@ -1047,6 +1108,8 @@ namespace zray
 
         // Instrument non-loop blocks
         insertedSled |= instrumentPostDomSet(npd, PostDomTree, regionProfile.PragmaRegionID, groupID, *F, IsIndirect);
+
+        } // end else (PlacementStrategy != "mst")
 
         // We only add the start/initial timing event at the end
         // This ensures that a counter increment for the first block in a region

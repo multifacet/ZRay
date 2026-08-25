@@ -5,7 +5,8 @@ zray_objs=zray_pass.o \
 		   zray_util.o \
 		   zray_loop.o \
 		   zray_parse.o \
-		   zray_codegen.o
+		   zray_codegen.o \
+		   zray_mst.o
 
 zray_check_objs=zray_check_sf.o
 
@@ -69,6 +70,7 @@ zray_codegen.o: zray_codegen.cc ../include/zray_pass.h
 zray_parse.o: zray_parse.cc ../include/zray_pass.h
 zray_loop.o: zray_loop.cc ../include/zray_pass.h
 zray_pass.o: zray_pass.cc ../include/zray_pass.h
+zray_mst.o: zray_mst.cc ../include/zray_pass.h ../include/zray_mst.h ../include/third_party/CFGMST.h
 noinline_pass.o: noinline_pass.cc ../include/noinline_pass.h ../include/zray_util.h
 $(zray_objs):
 	$(CUSTOM_CC) -c -o $@ $< $(cxxFlags) $(CFLAGS) $(flags)
