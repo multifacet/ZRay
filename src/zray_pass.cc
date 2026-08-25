@@ -102,19 +102,20 @@ namespace zray
 
             // Find all blocks control equivalent to B in npd, remove and place them in B's set.
             //
-            // TODO: this predicate does not check that the two blocks share the same
-            // innermost enclosing loop, and control equivalence alone does not imply
-            // equal execution counts across a loop boundary. A parent loop header p
-            // and a child loop header c satisfy Dom(p,c) and PDom(c,p), yet c runs
-            // once per child iteration and p once per parent iteration, so merging
-            // them undercounts c by a factor of the child's trip count.
+            // Blocks must also share the same innermost enclosing loop. Control
+            // equivalence alone does not imply equal execution counts across a loop
+            // boundary: a parent loop header p and a child loop header c satisfy
+            // Dom(p,c) and PDom(c,p), yet c runs once per child iteration and p once
+            // per parent iteration, so merging them into one set undercounts c by a
+            // factor of the child's trip count.
             //
-            // With loop hoisting enabled (the default) this cannot happen: loop blocks
-            // are claimed and erased from npd by instrumentSFLoopSet and
-            // _instrumentDynamicLoops before this runs, so the pool is at one nesting
+            // With loop hoisting enabled (the default) the merge is unreachable, because
+            // loop blocks are claimed and erased from npd by instrumentSFLoopSet and
+            // _instrumentDynamicLoops before this runs, leaving the pool at one nesting
             // level. Under -loophoist=false every loop block stays in npd and the merge
-            // above is reachable. Fix by adding LI->getLoopFor(b) == LI->getLoopFor(x)
-            // to the condition, which makes the partition correct regardless of the flag.
+            // is reachable, which measurably undercounts stores in a nested loop. The
+            // getLoopFor equality below makes the partition correct regardless of the
+            // flag rather than relying on the hoisting path to hide the case.
             //
             // Post-domination alone is not sufficient to share a counter. X post-dominating
             // B only gives "B executes => X executes"; a path that reaches X without passing
@@ -125,7 +126,8 @@ namespace zray
             // and independent of the order blocks appear in npd.
             for (int i = 0; i < npd->size(); i++)
             {
-                if (ApplyPostDomSets && pdTree->dominates((*npd)[i], b) && PreDomTree->dominates(b, (*npd)[i]))
+                if (ApplyPostDomSets && pdTree->dominates((*npd)[i], b) && PreDomTree->dominates(b, (*npd)[i]) &&
+                    LI->getLoopFor(b) == LI->getLoopFor((*npd)[i]))
                 {
                     tmp_blocks->push_back((*npd)[i]);
                     processedIndexes.push_back(i);
