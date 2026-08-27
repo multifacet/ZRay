@@ -21,6 +21,11 @@ namespace zray
 #define PASS_BEGIN "ZRAY_ROI_BEGIN"
 #define PASS_END "ZRAY_ROI_END"
 
+    // TODO: a small marked function can be inlined at every call site before this
+    // pass runs, duplicating its ROI markers into every caller. gcc turns 2 marked
+    // functions into 236 timed regions this way, which costs both accuracy (the
+    // out-of-line region never fires) and overhead (16x, and sampling cannot
+    // reduce it). Worth detecting duplicated markers here and warning.
     bool ZRayPass::detectPragma(Function &F)
     {
         // String to hold instruction we are parsing
@@ -560,6 +565,34 @@ namespace zray
 
         int count = getPointerOpCount(&(*I));
         auto large_const_info = getLargeConstantOpCount(&(*I));
+
+        // TODO: a 64-bit FP constant is charged 8 bytes here because it has no x86
+        // immediate encoding and must be materialized from the constant pool. That
+        // is right only when the backend actually emits a load each time the
+        // instruction executes, and for a loop-invariant constant it often does not:
+        // it may hoist the load into a register at the preheader, costing one load
+        // per loop entry rather than one per iteration.
+        //
+        // imagick shows the cost of getting this wrong. QuantumRange (65535.0) sits
+        // in MorphologyApply's inner loop, and charging 8 bytes across 9.3e9
+        // iterations for a load that happens once accounts for the whole +48.02%
+        // read-byte overcount against Pin -- the excess divided by the global-read
+        // count is 7.986 bytes.
+        //
+        // Suppressing the charge whenever the instruction is inside a loop was tried
+        // and reverted (see results-fpconst-zray/). It fixes imagick (+48.02% ->
+        // -0.08%) but breaks lbm (+3.35% -> -18.41%) and nab (-44.61% -> -48.28%),
+        // where the constants genuinely are reloaded every iteration. Mean absolute
+        // error improved but the worst case did not, and two workloads regressed.
+        //
+        // The two cases are indistinguishable in IR. Whether a constant becomes a
+        // hoisted register value or a folded RIP-relative memory operand
+        // (vmulsd .LCPI0_0(%rip), %xmm0) is decided during instruction selection, in
+        // the clang -O2 that runs on the already-instrumented module -- after this
+        // analysis has committed its per-block cost model. Resolving it needs the
+        // machine-level operand count, which is what ProfileData::EnableMIRPass
+        // exists for; no IR-level heuristic can separate imagick from lbm.
+
 
         profile.TotalInstCount += scaleFactor;
 

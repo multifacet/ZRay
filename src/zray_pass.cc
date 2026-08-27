@@ -92,10 +92,32 @@ namespace zray
             tmp_blocks->push_back(b);
             npd->erase(npd->begin());
 
-            // Find all blocks that postdominate B in npd, remove and place them in B's set.
+            // Find all blocks control equivalent to B in npd, remove and place them in B's set.
+            //
+            // TODO: this predicate does not check that the two blocks share the same
+            // innermost enclosing loop, and control equivalence alone does not imply
+            // equal execution counts across a loop boundary. A parent loop header p
+            // and a child loop header c satisfy Dom(p,c) and PDom(c,p), yet c runs
+            // once per child iteration and p once per parent iteration, so merging
+            // them undercounts c by a factor of the child's trip count.
+            //
+            // With loop hoisting enabled (the default) this cannot happen: loop blocks
+            // are claimed and erased from npd by instrumentSFLoopSet and
+            // _instrumentDynamicLoops before this runs, so the pool is at one nesting
+            // level. Under -loophoist=false every loop block stays in npd and the merge
+            // above is reachable. Fix by adding LI->getLoopFor(b) == LI->getLoopFor(x)
+            // to the condition, which makes the partition correct regardless of the flag.
+            //
+            // Post-domination alone is not sufficient to share a counter. X post-dominating
+            // B only gives "B executes => X executes"; a path that reaches X without passing
+            // through B leaves X's accesses uncounted, because the set's counter increment is
+            // emitted at B (the anchor) only. Requiring domination in the other direction as
+            // well makes the implication bidirectional: B executes <=> X executes. Control
+            // equivalence is an equivalence relation, so the resulting partition is canonical
+            // and independent of the order blocks appear in npd.
             for (int i = 0; i < npd->size(); i++)
             {
-                if (pdTree->dominates((*npd)[i], b) && ApplyPostDomSets)
+                if (ApplyPostDomSets && pdTree->dominates((*npd)[i], b) && PreDomTree->dominates(b, (*npd)[i]))
                 {
                     tmp_blocks->push_back((*npd)[i]);
                     processedIndexes.push_back(i);

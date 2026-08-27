@@ -37,7 +37,7 @@ struct SFCheckPass : public ModulePass
 	bool runOnModule(Module &M) override;
 	bool runOnFunction(Function &F);
 
-	bool getBackedgeTakenCount(const Loop *L, size_t *count);
+	bool getLoopTripCount(const Loop *L, size_t *count);
 
 	void evalLoopSF(const Loop * L);
 

@@ -25,7 +25,10 @@ export MACHINE_ARCH=$(uname -m)
 #Standardizing what version of LLVM we use could save/cause headache
 #Appears to work with : LLVM-12, 13
 #Breaks on: LLVM-10
-if [[ "$HOST" == "tboard" ]]; then
+# POSIX test, not [[ ]]: the shebang is /bin/sh, which is dash on Ubuntu and has
+# no [[ builtin. This file is meant to be sourced (". ./setupEnv.sh") -- running
+# it as ./setupEnv.sh sets the exports in a subshell that then exits.
+if [ "$HOST" = "tboard" ]; then
 export C=clang
 export CC=clang++
 export LINK=llvm-link
