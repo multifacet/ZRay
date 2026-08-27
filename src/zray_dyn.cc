@@ -643,6 +643,20 @@ static bool inMstMode()
     return probe.good();
 }
 
+// Move ZRay's aggregation out of the timed process, so a runtime-overhead
+// comparison against the MST arm measures the same span of work.
+//
+// One fidelity note: the dump carries no per-region TimingProfiles, only a scalar
+// timeDelta, so the offline CSV's "Time Elapsed" and the derived bandwidth
+// (MB/s) columns are not meaningful in this mode. Counts, byte volumes and
+// instruction totals are unaffected. Do not use this mode when you need
+// bandwidth.
+static bool deferPostProcess()
+{
+    const char *d = std::getenv("ZRAY_DEFER_POSTPROC");
+    return d != nullptr && d[0] == '1';
+}
+
 // Report any region this thread entered but never left.
 //
 // The pass emits exactly one endTimingEvent, in the single block it picked as the
@@ -651,13 +665,17 @@ static bool inMstMode()
 // returns to 0. After that, every later entry to that region looks like re-entry,
 // startTimingEvent returns early, and the region silently stops counting.
 //
+// Checked for every placement strategy, not just MST: the defect is in the timer
+// placement, so it affects all arms equally and an arm-specific check would make
+// the arms look different for the wrong reason.
+//
 // This matters more for the MST arm than for the native arms. A ZRay counter is a
 // block count that stands on its own, so lost increments show up as a proportional
 // undercount. An MST counter is one term in a flow system: dropping part of an
 // invocation leaves the system inconsistent, and the flow solve then produces a
 // plausible-looking wrong answer (negative solutions are clamped to zero rather
 // than reported). So this is a hard check, not a diagnostic to skim past.
-static void mst_check_region_balance()
+static void zray_check_region_balance()
 {
     size_t unbalanced = 0;
     for (size_t i = 0; i < PragmaRegionCount && i < PRAGMA_REGION_LIMIT; i++)
@@ -681,7 +699,7 @@ static void mst_check_region_balance()
     }
 }
 
-static void mst_dump_counters()
+static void dump_raw_counters()
 {
     std::ofstream hostlog("zray_host_log.bin", std::ios_base::app | std::ios::binary);
     size_t width = ZRAY_CounterDimension;
@@ -739,13 +757,15 @@ void zray_finalize()
 
     print_counter_array();
 
-    // MST arm: dump raw counters for offline reconstruction, then skip the ZRay
-    // in-process aggregation below -- it would read a ProfileData log that this
-    // arm never wrote.
-    if (inMstMode())
+    // Dump raw counters and skip the in-process aggregation below, either because
+    // this is the MST arm (which never wrote a ProfileData log for that code to
+    // read) or because the caller asked for the join to be deferred so that the
+    // timed window matches MST's.
+    zray_check_region_balance();
+
+    if (inMstMode() || deferPostProcess())
     {
-        mst_check_region_balance();
-        mst_dump_counters();
+        dump_raw_counters();
         return;
     }
 

@@ -1122,7 +1122,27 @@ namespace zray
             insertStartTimerEvent(_M, beginBlock->getFirstInsertionPt(), pragmaRegion);
             if (FullScan)
             {
-                insertEndTimerEvent(_M, --endBlock->end(), pragmaRegion);
+                // Close the region on EVERY exit, not just the region's last block.
+                //
+                // Exactly one of these runs per invocation, since a function leaves
+                // through one path, so the depth accounting stays balanced.
+                size_t ExitsInstrumented = 0;
+                for (BasicBlock &BB : *F)
+                {
+                    if (BB.getTerminator()->getNumSuccessors() == 0)
+                    {
+                        insertEndTimerEvent(_M, --BB.end(), pragmaRegion);
+                        ExitsInstrumented++;
+                    }
+                }
+                if (ExitsInstrumented == 0)
+                {
+                    // No reachable exit (e.g. an infinite loop, or every path ends in a
+                    // noreturn call). Nothing to close the region with; the runtime's
+                    // balance check reports it at thread exit.
+                    errs() << "ZRay: warning: region " << pragmaRegion << " in "
+                           << F->getName() << " has no exit block; region will not close.\n";
+                }
             }
         }
 
