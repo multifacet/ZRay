@@ -17,6 +17,15 @@
 
 namespace zray
 {
+    // Build a timing-only variant: suppress every counter increment while leaving
+    // region timing events, the profile records and the .zlog metadata intact. Such
+    // a run reports no traffic, but its ROI elapsed time is free of the counter
+    // overhead that inflates a normal ZRay run -- which is the denominator the
+    // data-volume-rate reference needs. Bytes for that reference come from Pin.
+    static llvm::cl::opt<bool> ApplyCounters(
+        "zraycounters", llvm::cl::desc("Emit counter increments (default true). Set false for a timing-only build."),
+        llvm::cl::value_desc("true/false"), llvm::cl::Hidden, llvm::cl::init(true));
+
 #if 0
     // TODO Verify this works with changes to getBBOffset
     //  Insert custom events into if/else CFG blocks and remove instruction counts from main region profile
@@ -203,6 +212,11 @@ namespace zray
 
     void ZRayPass::insertCounterArrayInc(Module *M, llvm::BasicBlock::iterator posI, const ProfileData &profile)
     {
+        if (!ApplyCounters)
+        {
+            return;
+        }
+
         // Create function type for custom event
         FunctionType *customType = FunctionType::get(Type::getVoidTy(M->getContext()),
                                                      {Type::getInt64Ty(M->getContext()),
@@ -452,23 +466,31 @@ namespace zray
 
         Value * dynSF = expander.expandCodeFor(v, v->getType(), &*builder.GetInsertPoint());
 
-        Value * dynSFInt64 = builder.CreateIntCast(dynSF, IntType, false);
+        // Only the counter call is suppressed for the timing-only variant. The
+        // profile record below must still be written, or the region loses its
+        // .zlog entry and the runtime has no name or group number to report it
+        // under -- which is what made the timing-only log come out with blank
+        // FUNCTION fields.
+        if (ApplyCounters)
+        {
+            Value * dynSFInt64 = builder.CreateIntCast(dynSF, IntType, false);
 
-        // v is the backedge-taken count; the blocks this counter covers post-dominate
-        // the loop header and therefore run BTC + 1 times per loop entry. The counter
-        // fires once per entry, so it must be advanced by the trip count.
-        dynSFInt64 = builder.CreateAdd(dynSFInt64, ConstantInt::get(IntType, 1));
+            // v is the backedge-taken count; the blocks this counter covers post-dominate
+            // the loop header and therefore run BTC + 1 times per loop entry. The counter
+            // fires once per entry, so it must be advanced by the trip count.
+            dynSFInt64 = builder.CreateAdd(dynSFInt64, ConstantInt::get(IntType, 1));
 
-        // Create function call to incrementCounterArraySF
-        FunctionType *customType = FunctionType::get(Type::getVoidTy(M->getContext()),
-                                                     {Type::getInt64Ty(M->getContext()),
-                                                      Type::getInt64Ty(M->getContext()),
-                                                      Type::getInt64Ty(M->getContext())},
-                                                     false);
-        auto customCallee = M->getOrInsertFunction(mangleFunctionName("incrementCounterArraySF(size_t,size_t,size_t)"), customType);
-        Value * RegionID = ConstantInt::get(Type::getInt64Ty(M->getContext()), profile.PragmaRegionID);
-        Value * PDSetID = ConstantInt::get(Type::getInt64Ty(M->getContext()), profile.PostDomSetID);
-        builder.CreateCall(customCallee, {RegionID, PDSetID, dynSFInt64})->setDebugLoc(builder.getCurrentDebugLocation());
+            // Create function call to incrementCounterArraySF
+            FunctionType *customType = FunctionType::get(Type::getVoidTy(M->getContext()),
+                                                         {Type::getInt64Ty(M->getContext()),
+                                                          Type::getInt64Ty(M->getContext()),
+                                                          Type::getInt64Ty(M->getContext())},
+                                                         false);
+            auto customCallee = M->getOrInsertFunction(mangleFunctionName("incrementCounterArraySF(size_t,size_t,size_t)"), customType);
+            Value * RegionID = ConstantInt::get(Type::getInt64Ty(M->getContext()), profile.PragmaRegionID);
+            Value * PDSetID = ConstantInt::get(Type::getInt64Ty(M->getContext()), profile.PostDomSetID);
+            builder.CreateCall(customCallee, {RegionID, PDSetID, dynSFInt64})->setDebugLoc(builder.getCurrentDebugLocation());
+        }
 
         // Value * incValue = builder.CreateAdd(loadedValue, dynSFInt64);
 
