@@ -1,6 +1,6 @@
 all: zray examples
 
-.PHONY: zray clean examples zray-cycles
+.PHONY: zray clean examples zray-cycles test
 
 zray-perf: export CFLAGS=-DUSE_HW_PERF_COUNTERS
 zray-perf:
@@ -21,6 +21,9 @@ zray:
 
 examples: zray
 	$(MAKE) -j $(nproc) -C examples
+
+test: zray
+	./tests/run-regressions.sh
 
 #Build example with m5op dump
 examples_gem5: zray

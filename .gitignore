@@ -15,6 +15,7 @@ build/
 
 # Compiler intermediates. Assembly and IR are generated under examples/.
 *.ll
+!tests/inputs/*.ll
 *.mir
 examples/**/*.s
 
