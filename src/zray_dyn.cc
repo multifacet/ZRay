@@ -612,12 +612,41 @@ void print_counter_array()
     }
 }
 
+// Diagnose a missing region exit before post-processing produces plausible-looking
+// but incomplete results. RegionDepth is thread-local, so this checks the thread
+// currently being finalized.
+static void zray_check_region_balance()
+{
+    size_t unbalanced = 0;
+    for (size_t i = 0; i < PragmaRegionCount && i < PRAGMA_REGION_LIMIT; i++)
+    {
+        if (RegionDepth[i] != 0)
+        {
+            if (unbalanced == 0)
+            {
+                std::cerr << "zray: WARNING: unbalanced region(s) at thread exit; "
+                             "counts for these regions are unreliable:\n";
+            }
+            std::cerr << "zray:   region " << i << " depth=" << RegionDepth[i] << "\n";
+            unbalanced++;
+        }
+    }
+    if (unbalanced != 0)
+    {
+        std::cerr << "zray: " << unbalanced
+                  << " region(s) never closed; check that every region entry has "
+                     "a matching exit.\n";
+    }
+}
+
 void zray_finalize()
 {
     timespec preprocess_start_time, preprocess_end_time;
     clock_gettime(CLOCK_MONOTONIC, &preprocess_start_time);
     using namespace std;
     std::lock_guard<std::mutex> guard(log_mutex);
+
+    zray_check_region_balance();
 
     std::vector<std::pair<std::string, zray::ProfileData> > counts;
     std::vector<std::pair<std::string, zray::ProfileData> > IndirectProfiles;
