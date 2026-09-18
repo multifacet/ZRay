@@ -6,6 +6,7 @@
 // See AUTHORS for contributor details and CITATION.cff for how to cite.
 
 #include "zray_dyn.h"
+#include <atomic>
 
 #ifdef USE_HW_PERF_COUNTERS
 #include <sys/ioctl.h>
@@ -23,7 +24,10 @@ std::string LOGO = "\
 
 std::mutex log_mutex;
 
-std::mutex host_interface_mutex;
+// Leaked on purpose: OpenMP runtimes tear their worker pool down from an atexit
+// handler, so worker thread-exit handlers can run after static destruction has
+// begun. A destroyed mutex or map here would be use-after-free at that point.
+std::mutex &host_interface_mutex = *new std::mutex();
 
 struct TimingProfile
 {
@@ -902,7 +906,23 @@ struct roi_descriptor{
 size_t COUNTER_WIDTH = 0;
 size_t ROI_COUNT = 0;
 
-std::unordered_map<size_t, roi_descriptor> registered_threads;
+std::unordered_map<size_t, roi_descriptor> &registered_threads =
+    *new std::unordered_map<size_t, roi_descriptor>();
+
+// Poll thread lifetime: stopped and joined from atexit so it never races
+// static destruction. The last poll runs after the stop flag is raised so the
+// tail of the run is captured.
+static std::atomic<bool> host_poll_stop(false);
+static std::thread *host_poll_thread = nullptr;
+
+static void __stop_host_proc()
+{
+    host_poll_stop = true;
+    if (host_poll_thread != nullptr && host_poll_thread->joinable())
+    {
+        host_poll_thread->join();
+    }
+}
 
 void __start_host_proc();
 void __host_poll_proc(int period);
@@ -928,10 +948,25 @@ void __register_thread_accel_to_host(size_t tid, volatile void * arrayAddr, vola
 #endif
 void __unregister_thread_accel_to_host(size_t tid);
 
-//Allocate memory for host polling process and start it
+//Allocate memory for host polling process and start it. Poll period in ms
+//comes from ZRAY_HOST_POLL_MS (default 2000).
 void __start_host_proc()
 {
-    new std::thread(__host_poll_proc, 2000);
+    int period = 2000;
+    if (const char *value = std::getenv("ZRAY_HOST_POLL_MS"))
+    {
+        int parsed = std::atoi(value);
+        if (parsed > 0)
+        {
+            period = parsed;
+        }
+        else
+        {
+            std::cerr << "zray: warning: ZRAY_HOST_POLL_MS must be a positive integer, using 2000 ms\n";
+        }
+    }
+    host_poll_thread = new std::thread(__host_poll_proc, period);
+    std::atexit(__stop_host_proc);
 }
 
 //Periodically check counters and record them, period in ms
@@ -970,7 +1005,6 @@ void __host_poll_proc(int period)
 
         host_interface_mutex.lock();
 
-        std::cout << "Starting poll\n";
 
         //Read counters to memory
         for (const auto& entry : registered_threads)
@@ -1043,6 +1077,23 @@ void __host_poll_proc(int period)
 
             logfile.write((char*)(&threadIDs[i]), sizeof(size_t));
 
+            //Sidecar with absolute timestamps: the binary log only stores per-thread
+            //deltas, so this is what places every thread's epochs on one time axis.
+            //One row per record, in the same order as the binary log.
+            {
+                static bool sidecarStarted = false;
+                static size_t record = 0;
+                std::ofstream sidecar("zray_host_poll.csv",
+                    sidecarStarted ? std::ios::app : std::ios::trunc);
+                if (!sidecarStarted)
+                {
+                    sidecar << "Record,Thread Hash,Poll Time (ns),Registered (ns)\n";
+                    sidecarStarted = true;
+                }
+                sidecar << record++ << "," << threadIDs[i] << "," << timingData[i]
+                        << "," << it->second.time0 << "\n";
+            }
+
             //TODO: Test out the even/odd ROI tracking later.
             //logfile.write((char*)(&roiTrackerData[i]), sizeof(size_t));
 
@@ -1072,11 +1123,19 @@ void __host_poll_proc(int period)
         auto end = std::chrono::system_clock::now();
         auto elapsed_time = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
 
-        //Sleep for remaining time in period
-        int time_remaining = period - elapsed_time.count();
-        if (time_remaining > 0)
+        if (host_poll_stop)
         {
-            std::this_thread::sleep_for(std::chrono::milliseconds(time_remaining));
+            break;
+        }
+
+        //Sleep for remaining time in period, waking early if asked to stop so
+        //the final poll above happens promptly.
+        int time_remaining = period - elapsed_time.count();
+        while (time_remaining > 0 && !host_poll_stop)
+        {
+            int slice = time_remaining < 20 ? time_remaining : 20;
+            std::this_thread::sleep_for(std::chrono::milliseconds(slice));
+            time_remaining -= slice;
         }
 
     }

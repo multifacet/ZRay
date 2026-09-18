@@ -276,7 +276,13 @@ namespace zray
             {
                 //Trip count is a loop invariant, we can continue
 
-                // TODO: Implement hoist chaining
+                // TODO: Hoist chaining for dynamic loops. Each dynamic loop currently gets
+                // its own counter in its own preheader, so an inner loop with runtime
+                // count x under an outer loop of 50 fires 50 times adding x, rather than
+                // once adding 50*x. To chain: pass the parent's SCEV down, multiply with
+                // SE->getMulExpr when the inner header post-dominates the parent header
+                // and the count is invariant in the *outer* loop, and expand the product
+                // in the outermost preheader. Mirror instrumentSFLoopSet's sf *= outer_sf.
 
                 // Sort the blocks that make up this loop into two sets,
                 // one set that is post-dom by loop header, and the other

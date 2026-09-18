@@ -169,7 +169,7 @@ namespace zray
         bool isIfElse(std::string Name);
         void recordInst(llvm::BasicBlock::iterator I, size_t ScaleFactor, ProfileData &Profile, Module *M);
         void clearRecords(ProfileData *Profile);
-        void splitInstrumentedBlocks(BasicBlock * /*, std::vector<szt_bbvec>, DominatorTree * */, Module *M, Function &F, size_t pragmaRegionID);
+        void splitInstrumentedBlocks(BasicBlock * /*, std::vector<szt_bbvec>, DominatorTree * */, Module *M, Function &F);
         void recordPragmaRegions(BasicBlock *, std::vector<szt_bbvec>, DominatorTree *);
         void recordRegion(size_t Begin, size_t End, ProfileData &RegionProfile, Function &F, Module *M);
         std::vector<llvm::BasicBlock *> *getBasicBlocks(size_t Begin, size_t End, Function &F);

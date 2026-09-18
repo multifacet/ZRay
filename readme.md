@@ -131,6 +131,13 @@ the IR pass scans for.
 
 The **group ID** labels a region. Regions may share an ID to form a group.
 
+Counting is per thread: a thread's accesses are attributed only while that thread is
+inside a region. A region that encloses an OpenMP parallel construct (with
+`--functionclone`, the default) is entered by every thread of the team for the duration
+of the outlined microtask, so each thread reports its own share of the parallel work
+under that region; a worker's `Time Elapsed` is the sum of its microtask invocations,
+the forking thread's is the wall time of the region.
+
 ---
 
 ## Configuration
@@ -142,6 +149,7 @@ The **group ID** labels a region. Regions may share an ID to form a group.
 | `ZRAY_LOGFILE` | **required** | Path where the pass writes region metadata and the runtime reads it back. |
 | `ZRAY_SAMPLE_RATE` | default `1` | Instrument every *N*th region execution. `1` = every execution; `100` = every hundredth; `0` = disable. Higher values cut overhead; see the paper's sampling study. |
 | `ZRAY_BIN_PATH` | set by `setupEnv.sh` | Output directory for build artifacts. |
+| `ZRAY_HOST_POLL_MS` | default `2000` | Poll period in ms for the host monitor thread (pass option `--hostmonitor`). Each poll appends one record per registered thread to `zray_host_log.bin` and a row with absolute timestamps to `zray_host_poll.csv`. |
 | `LLVM_BIN` | default `/usr/lib/llvm-15/bin` | Which LLVM install to build against. |
 
 `ZRAY_INST` and `ZRAY_PATCH_ID` are read by the runtime but are leftovers from an earlier
