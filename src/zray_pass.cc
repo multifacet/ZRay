@@ -848,7 +848,7 @@ namespace zray
         // Test out new function for splitting basic blocks
         if (!InstAll) {
             errs() << "Split basic blocks...\n";
-            splitInstrumentedBlocks(OrderedCFG[0], M, F, PRList.size());
+            splitInstrumentedBlocks(OrderedCFG[0], M, F);
         }
         errs() << "Reorder basic blocks...\n";
         OrderedCFG = orderBasicBlocks(F);
@@ -1059,6 +1059,27 @@ namespace zray
             {
                 insertEndTimerEvent(_M, --endBlock->end(), pragmaRegion);
             }
+        }
+        // An OpenMP microtask cloned for a region runs on every thread of the team,
+        // but only the forking thread has entered the region. Counting is per-thread
+        // state (globalDisable / counterBaseIndex in zray_dyn.cc), so without an
+        // entry of their own the workers' accesses inside the microtask are dropped
+        // and a region placed around a parallel loop only ever sees the master's
+        // share. Open the forking region on entry to the microtask and close it at
+        // every return, so each team thread accounts its share to that region. On
+        // the forking thread this re-enters an already-open region, which the
+        // runtime's depth tracking treats as a no-op; a worker's elapsed time is
+        // the sum of its microtask invocations.
+        else if (F->getName().startswith(".omp"))
+        {
+            for (auto &BB : *F)
+            {
+                if (isa<ReturnInst>(BB.getTerminator()))
+                {
+                    insertEndTimerEvent(_M, --BB.end(), pragmaRegion);
+                }
+            }
+            insertStartTimerEvent(_M, F->getEntryBlock().getFirstInsertionPt(), pragmaRegion);
         }
 
         if (!insertedSled)

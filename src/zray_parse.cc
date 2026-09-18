@@ -70,7 +70,7 @@ namespace zray
         return false;
     }
 
-    void ZRayPass::splitInstrumentedBlocks(BasicBlock *bb/*, std::vector<szt_bbvec> id_stack*/, Module *M, Function &F, size_t pragmaRegionID)
+    void ZRayPass::splitInstrumentedBlocks(BasicBlock *bb/*, std::vector<szt_bbvec> id_stack*/, Module *M, Function &F)
     {
         // Color this node in the CFG
         SplitBasicBlocksVisited.insert(bb);
@@ -113,7 +113,8 @@ namespace zray
                 if ((isToolFlag(ss.str(), PASS_END)) && (bb->end() != I))
                 {
                     // errs() << "Pass End: At " << bb->getName() << "\n";
-                    insertEndTimerEvent(M, I, pragmaRegionID);
+                    // The region exit call is emitted by recordPragmaRegions,
+                    // which knows which region the marker closes.
                     BasicBlock::iterator duplicate_I = I;
                     llvm::DominatorTree splitDomTree{F};
                     llvm::LoopInfo splitLoopInfo{splitDomTree};
@@ -135,7 +136,7 @@ namespace zray
         {
             if (SplitBasicBlocksVisited.find(bb_child) == SplitBasicBlocksVisited.end())
             {
-                splitInstrumentedBlocks(bb_child/*, id_stack*/, M, F, pragmaRegionID);
+                splitInstrumentedBlocks(bb_child/*, id_stack*/, M, F);
             }
         }
     }
@@ -238,6 +239,22 @@ namespace zray
                     auto it = std::find_if(id_stack.begin(), id_stack.end(),
                                            [&groupID](const szt_bbvec &e)
                                            { return e.first == groupID; });
+                    if (it == id_stack.end() || it->second.empty())
+                    {
+                        errs() << "zray: warning: region end with no open region (group id "
+                               << groupID << "), ignoring\n";
+                        continue;
+                    }
+
+                    // Close the region this marker belongs to. Regions are numbered in
+                    // the order their groups were first seen in this function, after
+                    // those of the functions already processed (see runOnFunction), so
+                    // a function holding several regions closes each with its own id.
+                    auto group = std::find_if(BasicBlockGroupList.begin(), BasicBlockGroupList.end(),
+                                              [&groupID](const szt_bbvec &e)
+                                              { return e.first == groupID; });
+                    size_t regionID = PRList.size() + std::distance(BasicBlockGroupList.begin(), group);
+                    insertEndTimerEvent(_M, I, regionID);
 
                     // Verify with domination
                     if (!dtree->dominates(it->second.back(), bb))
